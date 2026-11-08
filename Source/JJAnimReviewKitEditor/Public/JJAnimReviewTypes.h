@@ -64,7 +64,7 @@ struct JJANIMREVIEWKITEDITOR_API FJJReviewPoseData
     GENERATED_BODY()
 
     UPROPERTY()
-    int32 SchemaVersion = 1;
+    int32 SchemaVersion = 2;
 
     UPROPERTY()
     FString ContentId;
@@ -176,6 +176,20 @@ struct JJANIMREVIEWKITEDITOR_API FJJReviewAnnotation
     UPROPERTY()
     FString Text;
 
+    // INDEX_NONE preserves single-frame semantics for existing C++ callers.
+    UPROPERTY()
+    int32 EndFrame = INDEX_NONE;
+
+    UPROPERTY()
+    FString GroupName;
+
+    UPROPERTY()
+    TArray<FName> Bones;
+
+    // Relative to the asset directory, shared by carried annotations.
+    UPROPERTY()
+    TArray<FString> Images;
+
     // Empty or +X/-X/+Y/-Y/+Z/-Z in world axes; amount little/much.
     UPROPERTY()
     FString Direction;
@@ -193,7 +207,7 @@ struct JJANIMREVIEWKITEDITOR_API FJJReviewBundle
     GENERATED_BODY()
 
     UPROPERTY()
-    int32 SchemaVersion = 1;
+    int32 SchemaVersion = 2;
 
     UPROPERTY()
     FString Asset;

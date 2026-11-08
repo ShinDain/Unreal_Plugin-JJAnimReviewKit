@@ -1,6 +1,7 @@
 #include "JJAnimReviewStore.h"
 
 #include "JJAnimReviewModel.h"
+#include "JJAnimReviewNotes.h"
 #include "HAL/FileManager.h"
 #include "Misc/FileHelper.h"
 #include "Misc/Paths.h"
@@ -34,6 +35,15 @@ namespace JJAnimReviewStorePrivate
     bool Copy(const FString& Destination, const FString& Source)
     {
         return IFileManager::Get().Copy(*Destination, *Source, true, false, false) == COPY_OK;
+    }
+
+    bool ReadAssetIdentity(const FString& Path, FString& Asset)
+    {
+        FString Json;
+        TSharedPtr<FJsonObject> Object;
+        return FFileHelper::LoadFileToString(Json, *Path)
+            && FJsonSerializer::Deserialize(TJsonReaderFactory<>::Create(Json), Object)
+            && Object && Object->TryGetStringField(TEXT("asset"), Asset);
     }
 }
 
@@ -103,11 +113,9 @@ bool FJJAnimReviewStore::IsOwnedTake(const FString& Directory) const
 {
     const FString Full = JJAnimReviewStorePrivate::FullPath(Directory);
     const FString Name = FPaths::GetCleanFilename(Full);
-    const FString Digits = Name.Mid(5);
+    int32 Number = 0;
     return FPaths::GetPath(Full).Equals(AssetDirectory, ESearchCase::IgnoreCase)
-        && Name.StartsWith(TEXT("take_")) && Digits.Len() >= 6 && Digits.IsNumeric()
-        && Name == FString::Printf(TEXT("take_%06d"), FCString::Atoi(*Digits))
-        && FCString::Atoi(*Digits) > 0;
+        && JJAnimReviewModel::ParseTakeName(Name, Number);
 }
 
 bool FJJAnimReviewStore::Recover(const FString& Directory, FString& Error)
@@ -162,7 +170,34 @@ bool FJJAnimReviewStore::ReadTakes(TArray<FJJReviewBundle>& Takes, FString& Erro
         {
             continue;
         }
+        const FString ReviewPath = Directory / TEXT("review.json");
         const bool bInterrupted = IFileManager::Get().FileExists(*(Directory / TEXT(".transaction")));
+        FString TransactionKind;
+        if (bInterrupted)
+        {
+            FFileHelper::LoadFileToString(TransactionKind, *(Directory / TEXT(".transaction")));
+        }
+        if (IFileManager::Get().FileExists(*ReviewPath))
+        {
+            FString ExistingAsset;
+            const bool bReadable = JJAnimReviewStorePrivate::ReadAssetIdentity(ReviewPath, ExistingAsset);
+            if ((bReadable && !ExistingAsset.Equals(CanonicalAsset, ESearchCase::IgnoreCase))
+                || (!bReadable && (!bInterrupted || TransactionKind != TEXT("existing"))))
+            {
+                Error = TEXT("Asset folder collision or unreadable identity; no recovery/write allowed: ") + ReviewPath;
+                return false;
+            }
+        }
+        if (bInterrupted && TransactionKind == TEXT("existing"))
+        {
+            FString PreviousAsset;
+            if (!JJAnimReviewStorePrivate::ReadAssetIdentity(ReviewPath + TEXT(".previous"), PreviousAsset)
+                || !PreviousAsset.Equals(CanonicalAsset, ESearchCase::IgnoreCase))
+            {
+                Error = TEXT("Transaction backup asset identity mismatch; preserve files: ") + Directory;
+                return false;
+            }
+        }
         if (bReadOnly && bInterrupted)
         {
             Error = TEXT("Bundle transaction in progress; retry after the writer finishes: ") + Directory
@@ -174,7 +209,6 @@ bool FJJAnimReviewStore::ReadTakes(TArray<FJJReviewBundle>& Takes, FString& Erro
             Error += JJAnimReviewStorePrivate::RecoveryHint(Directory);
             return false;
         }
-        const FString ReviewPath = Directory / TEXT("review.json");
         if (!IFileManager::Get().FileExists(*ReviewPath))
         {
             // Staging-only directories have never committed a review.
@@ -237,11 +271,18 @@ bool FJJAnimReviewStore::Save(const FJJReviewBundle& Bundle, const FJJReviewPose
     using namespace JJAnimReviewStorePrivate;
     const FString Directory = GetTakeDirectory(Bundle.Take);
     FString Computed;
-    if (!WriteLock || !IsOwnedTake(Directory) || !JJAnimReviewModel::ValidateBundle(Bundle, Error)
+    if (!WriteLock || !Bundle.Asset.Equals(CanonicalAsset, ESearchCase::IgnoreCase)
+        || Pose.SchemaVersion != 2 || !IsOwnedTake(Directory) || !JJAnimReviewModel::ValidateBundle(Bundle, Error)
         || !JJAnimReviewModel::ComputeContentId(Pose, Computed, Error)
         || Computed != Bundle.ContentId || Pose.ContentId != Bundle.ContentId)
     {
         Error = TEXT("Refusing to save an invalid bundle: ") + Error;
+        return false;
+    }
+    // Refuse collisions before recovery or staging can rewrite committed data.
+    TArray<FJJReviewBundle> ExistingTakes;
+    if (!ReadTakes(ExistingTakes, Error))
+    {
         return false;
     }
     if (!IFileManager::Get().MakeDirectory(*Directory, true) || !Recover(Directory, Error))
@@ -328,4 +369,48 @@ void FJJAnimReviewStore::Prune(const TArray<FJJReviewBundle>& Takes, TArray<FStr
             Warnings.Add(TEXT("Retention cleanup skipped/failed: ") + Directory);
         }
     }
+    // Re-read after deletion: a failed take deletion must keep its image references.
+    TArray<FJJReviewBundle> Remaining;
+    FString Error;
+    if (!ReadTakes(Remaining, Error))
+    {
+        Warnings.Add(TEXT("Image cleanup skipped: ") + Error);
+        return;
+    }
+    TArray<FString> Folders;
+    IFileManager::Get().FindFiles(Folders, *(AssetDirectory / TEXT("notes/*")), false, true);
+    for (const FString& Folder : JJAnimReviewNotes::UnreferencedImageFolders(Folders, Remaining))
+    {
+        const FString Directory = AssetDirectory / TEXT("notes") / Folder;
+        if (!IFileManager::Get().DeleteDirectory(*Directory, false, true))
+        {
+            Warnings.Add(TEXT("Image cleanup failed: ") + Directory);
+        }
+    }
+}
+
+FString FJJAnimReviewStore::GetImagePath(const FString& Relative) const
+{
+    return JJAnimReviewNotes::IsSafeImagePath(Relative) ? AssetDirectory / Relative : FString();
+}
+
+bool FJJAnimReviewStore::ImportImage(FJJReviewAnnotation& Annotation, const FString& Source, FString& Error)
+{
+    FString Extension = FPaths::GetExtension(Source).ToLower();
+    if (Extension == TEXT("jpeg"))
+    {
+        Extension = TEXT("jpg");
+    }
+    const FString Relative = TEXT("notes/") + Annotation.AnnotationId + TEXT("/")
+        + FGuid::NewGuid().ToString(EGuidFormats::Digits) + TEXT(".") + Extension;
+    const FString Destination = GetImagePath(Relative);
+    if (bReadOnly || !WriteLock || Destination.IsEmpty() || (Extension != TEXT("png") && Extension != TEXT("jpg"))
+        || !IFileManager::Get().MakeDirectory(*FPaths::GetPath(Destination), true)
+        || IFileManager::Get().Copy(*Destination, *Source, false, false, false) != COPY_OK)
+    {
+        Error = TEXT("Cannot copy PNG/JPG annotation attachment.");
+        return false;
+    }
+    Annotation.Images.Add(Relative);
+    return true;
 }

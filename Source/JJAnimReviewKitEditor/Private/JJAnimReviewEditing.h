@@ -8,5 +8,6 @@ namespace JJAnimReviewEditing
     bool Apply(FJJReviewBundle& Bundle, FJJReviewAnnotation Annotation, const FString& Operation, FString& Error);
     TArray<FJJReviewPoseDifference> PoseInstructions(const FJJReviewPoseData& Original,
         const FJJReviewPoseSample& Preview, FString& SignedInstructions,
-        double TranslationThreshold = 0.1, double RotationThreshold = 0.5);
+        double TranslationThreshold = 0.1, double RotationThreshold = 0.5,
+        const TSet<FName>* ModifiedBones = nullptr);
 }

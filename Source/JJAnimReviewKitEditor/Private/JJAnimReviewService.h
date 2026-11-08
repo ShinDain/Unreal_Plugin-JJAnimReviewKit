@@ -30,4 +30,6 @@ namespace JJAnimReviewService
     bool ReadTakePose(const FString& Asset, const FString& Take, FJJReviewPoseData& Pose, FString& Error);
     bool EditAnnotation(const FString& Asset, const FString& ExpectedContentId,
         FJJReviewAnnotation Annotation, const FString& Operation, FString& Error);
+    bool EditAnnotationWithImage(const FString& Asset, const FString& ExpectedContentId,
+        FJJReviewAnnotation Annotation, const FString& Operation, const FString& SourceImage, FString& Error);
 }

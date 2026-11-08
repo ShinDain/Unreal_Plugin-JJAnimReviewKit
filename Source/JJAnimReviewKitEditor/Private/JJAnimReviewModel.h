@@ -22,7 +22,7 @@ namespace JJAnimReviewModel
         FText Reason;
         TSharedPtr<FJsonObject> Object;
         const TSharedRef<TJsonReader<>> Reader = TJsonReaderFactory<>::Create(Json);
-        if (!FJsonSerializer::Deserialize(Reader, Object) || !ValidateJsonShape(Object, T::StaticStruct(), Error))
+        if (!FJsonSerializer::Deserialize(Reader, Object) || !Object)
         {
             if (Error.IsEmpty())
             {
@@ -30,12 +30,22 @@ namespace JJAnimReviewModel
             }
             return false;
         }
+        int32 Version = 0;
+        if (!Object->TryGetNumberField(TEXT("schemaVersion"), Version) || Version != 2)
+        {
+            Error = TEXT("Unsupported review schema version");
+            return false;
+        }
+        if (!ValidateJsonShape(Object, T::StaticStruct(), Error))
+        {
+            return false;
+        }
         if (!FJsonObjectConverter::JsonObjectToUStruct(Object.ToSharedRef(), T::StaticStruct(), &Value, 0, 0, true, &Reason))
         {
             Error = Reason.ToString();
             return false;
         }
-        if (Value.SchemaVersion != 1)
+        if (Value.SchemaVersion != 2)
         {
             Error = TEXT("Unsupported review schema version");
             return false;
@@ -43,6 +53,8 @@ namespace JJAnimReviewModel
         return true;
     }
 
+    bool ParseTakeName(const FString& Name, int32& Number);
+    TArray<FString> SortTakeNames(const TArray<FString>& Names);
     FString AssetDirectoryKey(const FString& CanonicalObjectPath);
     bool ComputeContentId(const FJJReviewPoseData& Pose, FString& ContentId, FString& Error);
     bool ValidateBundle(const FJJReviewBundle& Bundle, FString& Error);

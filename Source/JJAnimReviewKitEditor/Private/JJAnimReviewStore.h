@@ -14,6 +14,8 @@ public:
     bool ReadPose(const FJJReviewBundle& Bundle, FJJReviewPoseData& Pose, FString& Error) const;
     bool Save(const FJJReviewBundle& Bundle, const FJJReviewPoseData& Pose, FString& Error);
     void Prune(const TArray<FJJReviewBundle>& Takes, TArray<FString>& Warnings);
+    bool ImportImage(FJJReviewAnnotation& Annotation, const FString& Source, FString& Error);
+    FString GetImagePath(const FString& Relative) const;
     FString GetTakeDirectory(const FString& Take) const;
 
 private:

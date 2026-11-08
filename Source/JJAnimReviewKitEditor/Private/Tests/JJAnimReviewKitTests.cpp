@@ -77,7 +77,7 @@ namespace JJAnimReviewKitTestsPrivate
         FJJReviewBundle Bundle;
         Bundle.Asset = TEXT("/Game/ClaudeTest/Fake.Fake");
         Bundle.TakeNumber = TakeNumber;
-        Bundle.Take = FString::Printf(TEXT("take_%06d"), TakeNumber);
+        Bundle.Take = FString::Printf(TEXT("take_%d"), TakeNumber);
         Bundle.ContentId = ContentId;
         Bundle.CreatedUtc = TEXT("2026-11-07T00:00:00Z");
         Bundle.UpdatedUtc = Bundle.CreatedUtc;
@@ -182,19 +182,36 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(FJJAnimReviewAssetKeyTest,
 
 bool FJJAnimReviewAssetKeyTest::RunTest(const FString& Parameters)
 {
+    // D18: <asset name>_<first 6 hex of MD5(lowercase object path)>.
     const FString KeyA = JJAnimReviewModel::AssetDirectoryKey(TEXT("/Game/Anims/Walk.Walk"));
     const FString KeyB = JJAnimReviewModel::AssetDirectoryKey(TEXT("/Game/Anims/Run.Run"));
     TestEqual(TEXT("Key is deterministic"), JJAnimReviewModel::AssetDirectoryKey(TEXT("/Game/Anims/Walk.Walk")), KeyA);
     TestNotEqual(TEXT("Different assets get different keys"), KeyA, KeyB);
-    TestTrue(TEXT("Key contains only safe characters"), HasOnlySafeCharacters(KeyA));
+    TestTrue(TEXT("Key starts with the asset name"), KeyA.StartsWith(TEXT("Walk_"), ESearchCase::CaseSensitive));
+    TestEqual(TEXT("Key is name + '_' + 6 hex"), KeyA.Len(), 4 + 1 + 6);
+    TestTrue(TEXT("Hash part is lowercase hex"), HasOnlySafeCharacters(KeyA.Right(6)));
 
-    const FString LongPath = TEXT("/Game/") + FString::ChrN(200, TEXT('a')) + TEXT(".Asset");
-    const FString LongKey = JJAnimReviewModel::AssetDirectoryKey(LongPath);
-    TestTrue(TEXT("Long path key is bounded (80 + 1 + 32)"), LongKey.Len() <= 113);
+    const FString SameNameOtherFolder = JJAnimReviewModel::AssetDirectoryKey(TEXT("/Game/Enemy/Walk.Walk"));
+    TestTrue(TEXT("Same asset name in another folder keeps the readable name"), SameNameOtherFolder.StartsWith(TEXT("Walk_")));
+    TestNotEqual(TEXT("Same asset name in another folder gets another hash"), SameNameOtherFolder, KeyA);
 
-    const FString SimilarA = JJAnimReviewModel::AssetDirectoryKey(TEXT("/Game/") + FString::ChrN(100, TEXT('a')) + TEXT("1.X"));
-    const FString SimilarB = JJAnimReviewModel::AssetDirectoryKey(TEXT("/Game/") + FString::ChrN(100, TEXT('a')) + TEXT("2.X"));
-    TestNotEqual(TEXT("Paths sharing the 80-char readable prefix still differ"), SimilarA, SimilarB);
+    TestEqual(TEXT("Case of the path does not change the hash"),
+        JJAnimReviewModel::AssetDirectoryKey(TEXT("/game/anims/walk.Walk")).Right(6), KeyA.Right(6));
+
+    const FString Unsafe = JJAnimReviewModel::AssetDirectoryKey(TEXT("/Game/Anims/A B-C.A B-C"));
+    TestTrue(TEXT("Non-alphanumeric characters become '_'"), Unsafe.StartsWith(TEXT("A_B_C_")));
+
+    const FString Real = JJAnimReviewModel::AssetDirectoryKey(TEXT("/Game/Ter/Player/TestAnims/Movement/AS_PatrolLoop.AS_PatrolLoop"));
+    TestEqual(TEXT("Codex commandlet folder matches the key"), Real, FString(TEXT("AS_PatrolLoop_827f92")));
+
+    // R5-fix L3: readable name is capped at 80 characters; the hash still separates long names.
+    const FString LongName = FString::ChrN(200, TEXT('a'));
+    const FString LongKey = JJAnimReviewModel::AssetDirectoryKey(TEXT("/Game/Long/") + LongName + TEXT(".") + LongName);
+    TestEqual(TEXT("Long name key is bounded (80 + 1 + 6)"), LongKey.Len(), 87);
+    const FString SimilarA = JJAnimReviewModel::AssetDirectoryKey(TEXT("/Game/A/") + FString::ChrN(100, TEXT('a')) + TEXT("1.") + FString::ChrN(100, TEXT('a')) + TEXT("1"));
+    const FString SimilarB = JJAnimReviewModel::AssetDirectoryKey(TEXT("/Game/A/") + FString::ChrN(100, TEXT('a')) + TEXT("2.") + FString::ChrN(100, TEXT('a')) + TEXT("2"));
+    TestEqual(TEXT("Names sharing the 80-char prefix keep the same readable part"), SimilarA.Left(80), SimilarB.Left(80));
+    TestNotEqual(TEXT("Names sharing the 80-char prefix still differ by hash"), SimilarA, SimilarB);
     return true;
 }
 
@@ -209,7 +226,7 @@ bool FJJAnimReviewTakeLifecycleTest::RunTest(const FString& Parameters)
     FJJReviewBundle First = MakeBundle(0, IdA);
     JJAnimReviewModel::SelectTake(First, nullptr, TEXT("T1"));
     TestEqual(TEXT("First review is take 1"), First.TakeNumber, 1);
-    TestEqual(TEXT("Take name is zero padded"), First.Take, FString(TEXT("take_000001")));
+    TestEqual(TEXT("Take name has no zero padding (D17)"), First.Take, FString(TEXT("take_1")));
     First.Annotations.Add(MakeAnnotation(TEXT("a-open"), First.Take, IdA));
     First.Annotations.Add(MakeAnnotation(TEXT("a-resolved"), First.Take, IdA, TEXT("resolved")));
     First.Images.Add(TEXT("sheet.png"));
@@ -230,7 +247,7 @@ bool FJJAnimReviewTakeLifecycleTest::RunTest(const FString& Parameters)
     {
         const FJJReviewAnnotation& Carried = Changed.Annotations[0];
         TestEqual(TEXT("Carried annotation keeps its id"), Carried.AnnotationId, FString(TEXT("a-open")));
-        TestEqual(TEXT("Carried annotation keeps its authored take"), Carried.AuthoredTake, FString(TEXT("take_000001")));
+        TestEqual(TEXT("Carried annotation keeps its authored take"), Carried.AuthoredTake, FString(TEXT("take_1")));
         TestEqual(TEXT("Carried annotation keeps its authored content"), Carried.AuthoredContentId, IdA);
         TestTrue(TEXT("Carried annotation is marked as from a previous version"), Carried.bFromPreviousVersion);
     }
@@ -252,7 +269,7 @@ bool FJJAnimReviewTakeLifecycleTest::RunTest(const FString& Parameters)
     TestFalse(TEXT("Duplicate annotation id is invalid"), JJAnimReviewModel::ValidateBundle(Duplicate, Error));
 
     FJJReviewBundle WrongName = First;
-    WrongName.Take = TEXT("take_1");
+    WrongName.Take = TEXT("take_01");
     TestFalse(TEXT("Take name must match the number"), JJAnimReviewModel::ValidateBundle(WrongName, Error));
     return true;
 }
@@ -293,7 +310,7 @@ bool FJJAnimReviewRetentionTest::RunTest(const FString& Parameters)
     TArray<FJJReviewBundle> WithOpen = MakeTakes(12);
     for (FJJReviewBundle& Take : WithOpen)
     {
-        Take.Annotations.Add(MakeAnnotation(TEXT("keep"), TEXT("take_000001"), Id));
+        Take.Annotations.Add(MakeAnnotation(TEXT("keep"), TEXT("take_1"), Id));
         Take.Annotations.Last().bFromPreviousVersion = Take.TakeNumber != 1;
     }
     TestTrue(TEXT("Authored take of a note open in the latest survives; carried-only intermediates are pruned"),
@@ -314,7 +331,7 @@ bool FJJAnimReviewRetentionTest::RunTest(const FString& Parameters)
     for (FJJReviewBundle& Take : ResolvedInLatest)
     {
         const bool bLatest = Take.TakeNumber == 12;
-        Take.Annotations.Add(MakeAnnotation(TEXT("keep"), TEXT("take_000001"), Id, bLatest ? TEXT("resolved") : TEXT("open")));
+        Take.Annotations.Add(MakeAnnotation(TEXT("keep"), TEXT("take_1"), Id, bLatest ? TEXT("resolved") : TEXT("open")));
     }
     TestTrue(TEXT("Resolving in the latest releases the authored take"),
         PrunedNumbers(ResolvedInLatest, JJAnimReviewModel::SelectPrunableTakes(ResolvedInLatest)) == TArray<int32>({ 1, 2 }));
@@ -358,7 +375,7 @@ bool FJJAnimReviewMarkdownBudgetTest::RunTest(const FString& Parameters)
     Passed.Status = TEXT("passed");
     Bundle.Checks = { Warning, Failure, Passed };
 
-    Bundle.Annotations.Add(MakeAnnotation(TEXT("old"), TEXT("take_000001"), IdA));
+    Bundle.Annotations.Add(MakeAnnotation(TEXT("old"), TEXT("take_1"), IdA));
     Bundle.Annotations.Last().bFromPreviousVersion = true;
     Bundle.Annotations.Add(MakeAnnotation(TEXT("new"), Bundle.Take, IdB));
 
@@ -440,7 +457,7 @@ bool FJJAnimReviewJsonTest::RunTest(const FString& Parameters)
     TestFalse(TEXT("Missing field is rejected"), JJAnimReviewModel::FromJson(Write(Missing), Loaded, Error));
 
     TSharedPtr<FJsonObject> Future = MakeShared<FJsonObject>(*Object);
-    Future->SetNumberField(TEXT("schemaVersion"), 2);
+    Future->SetNumberField(TEXT("schemaVersion"), 3);
     TestFalse(TEXT("Unsupported schema version is rejected"), JJAnimReviewModel::FromJson(Write(Future), Loaded, Error));
 
     TestFalse(TEXT("Garbage is rejected"), JJAnimReviewModel::FromJson(TEXT("{not json"), Loaded, Error));
@@ -506,7 +523,7 @@ bool FJJAnimReviewStoreTest::RunTest(const FString& Parameters)
         TestEqual(TEXT("Recovered take is readable"), Takes.Num(), 1);
         TestFalse(TEXT("Transaction marker is cleared"), IFileManager::Get().FileExists(*(TakeDir / TEXT(".transaction"))));
 
-        const FString NewDir = Store.GetTakeDirectory(TEXT("take_000002"));
+        const FString NewDir = Store.GetTakeDirectory(TEXT("take_2"));
         IFileManager::Get().MakeDirectory(*NewDir, true);
         FFileHelper::SaveStringToFile(TEXT("{ partial"), *(NewDir / TEXT("pose.json")));
         FFileHelper::SaveStringToFile(TEXT("new"), *(NewDir / TEXT(".transaction")));

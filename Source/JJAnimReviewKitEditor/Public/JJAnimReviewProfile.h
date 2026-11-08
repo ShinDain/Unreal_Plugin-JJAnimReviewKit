@@ -37,6 +37,9 @@ struct JJANIMREVIEWKITEDITOR_API FJJReviewProfileSettings
 
     FJJReviewProfileSettings();
 
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Review|Sheet")
+    double ForwardYawOffset = 90.0;
+
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Review")
     TArray<FName> FootBones;
 

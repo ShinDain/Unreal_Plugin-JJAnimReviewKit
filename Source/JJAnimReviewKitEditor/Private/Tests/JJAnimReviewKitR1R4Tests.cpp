@@ -508,7 +508,7 @@ bool FJJAnimReviewEditingTest::RunTest(const FString& Parameters)
     FJJReviewBundle Bundle;
     Bundle.Asset = TEXT("/Game/ClaudeTest/Fake.Fake");
     Bundle.TakeNumber = 2;
-    Bundle.Take = TEXT("take_000002");
+    Bundle.Take = TEXT("take_2");
     Bundle.ContentId = ContentId;
     Bundle.CreatedUtc = TEXT("2026-11-07T00:00:00Z");
     Bundle.UpdatedUtc = Bundle.CreatedUtc;
@@ -549,7 +549,7 @@ bool FJJAnimReviewEditingTest::RunTest(const FString& Parameters)
     // Editing a carried note re-authors it in the current take (D15: origin follows content).
     FJJReviewAnnotation Carried;
     Carried.AnnotationId = TEXT("carried-1");
-    Carried.AuthoredTake = TEXT("take_000001");
+    Carried.AuthoredTake = TEXT("take_1");
     Carried.AuthoredContentId = TEXT("pose_md5_v2:old");
     Carried.bFromPreviousVersion = true;
     Carried.Frame = 2;

@@ -1,6 +1,34 @@
 #include "JJAnimReviewEditing.h"
 
 #include "JJAnimReviewModel.h"
+#include "JJAnimReviewNotes.h"
+
+namespace JJAnimReviewEditingPrivate
+{
+    bool RelativeDelta(const FJJReviewPoseData& Original, const FJJReviewPoseSample& Preview,
+        int32 Bone, FVector& Translation, FQuat& Delta)
+    {
+        FTransform A = Original.Samples[0].ComponentTransforms[Bone].ToTransform();
+        FTransform Z = Preview.ComponentTransforms[Bone].ToTransform();
+        const int32 Parent = Original.ParentIndices[Bone];
+        if (Parent != INDEX_NONE)
+        {
+            A = A.GetRelativeTransform(Original.Samples[0].ComponentTransforms[Parent].ToTransform());
+            Z = Z.GetRelativeTransform(Preview.ComponentTransforms[Parent].ToTransform());
+        }
+        if (A.ContainsNaN() || Z.ContainsNaN())
+        {
+            return false;
+        }
+        Translation = Z.GetTranslation() - A.GetTranslation();
+        Delta = (Z.GetRotation() * A.GetRotation().Inverse()).GetNormalized();
+        if (Delta.W < 0)
+        {
+            Delta = Delta * -1.0;
+        }
+        return true;
+    }
+}
 
 bool JJAnimReviewEditing::Apply(FJJReviewBundle& Bundle, FJJReviewAnnotation Annotation,
     const FString& Operation, FString& Error)
@@ -41,7 +69,7 @@ bool JJAnimReviewEditing::Apply(FJJReviewBundle& Bundle, FJJReviewAnnotation Ann
     {
         TEXT(""), TEXT("+X"), TEXT("-X"), TEXT("+Y"), TEXT("-Y"), TEXT("+Z"), TEXT("-Z")
     };
-    if (Annotation.Frame < 0 || !Directions.Contains(Annotation.Direction)
+    if (!JJAnimReviewNotes::ValidateRange(Annotation, MAX_int32, Error) || !Directions.Contains(Annotation.Direction)
         || (!Annotation.Amount.IsEmpty() && Annotation.Amount != TEXT("little") && Annotation.Amount != TEXT("much")))
     {
         Error = TEXT("Invalid frame or direction/amount");
@@ -75,7 +103,7 @@ bool JJAnimReviewEditing::Apply(FJJReviewBundle& Bundle, FJJReviewAnnotation Ann
 
 TArray<FJJReviewPoseDifference> JJAnimReviewEditing::PoseInstructions(const FJJReviewPoseData& Original,
     const FJJReviewPoseSample& Preview, FString& SignedInstructions,
-    double TranslationThreshold, double RotationThreshold)
+    double TranslationThreshold, double RotationThreshold, const TSet<FName>* ModifiedBones)
 {
     TArray<FJJReviewPoseDifference> Differences;
     SignedInstructions.Reset();
@@ -87,27 +115,16 @@ TArray<FJJReviewPoseDifference> JJAnimReviewEditing::PoseInstructions(const FJJR
     }
     for (int32 B = 0; B < Original.BoneNames.Num(); ++B)
     {
-        FTransform A = Original.Samples[0].ComponentTransforms[B].ToTransform();
-        FTransform Z = Preview.ComponentTransforms[B].ToTransform();
-        const int32 P = Original.ParentIndices[B];
-        if (P != INDEX_NONE)
+        const int32 Parent = Original.ParentIndices[B];
+        if (Parent != INDEX_NONE && !Original.BoneNames.IsValidIndex(Parent))
         {
-            if (!Original.BoneNames.IsValidIndex(P))
-            {
-                return {};
-            }
-            A = A.GetRelativeTransform(Original.Samples[0].ComponentTransforms[P].ToTransform());
-            Z = Z.GetRelativeTransform(Preview.ComponentTransforms[P].ToTransform());
+            return {};
         }
-        if (A.ContainsNaN() || Z.ContainsNaN())
+        FVector Translation;
+        FQuat Delta;
+        if (!JJAnimReviewEditingPrivate::RelativeDelta(Original, Preview, B, Translation, Delta))
         {
             continue;
-        }
-        const FVector Translation = Z.GetTranslation() - A.GetTranslation();
-        FQuat Delta = (Z.GetRotation() * A.GetRotation().Inverse()).GetNormalized();
-        if (Delta.W < 0)
-        {
-            Delta = Delta * -1.0;
         }
         const double Degrees = FMath::RadiansToDegrees(Delta.GetAngle());
         if (Translation.Size() <= TranslationThreshold && Degrees <= RotationThreshold)
@@ -120,9 +137,26 @@ TArray<FJJReviewPoseDifference> JJAnimReviewEditing::PoseInstructions(const FJJR
         Difference.TranslationCm = Translation.Size();
         Difference.RotationDegrees = Degrees;
         Differences.Add(Difference);
+    }
+
+    if (ModifiedBones)
+    {
+        Differences = JJAnimReviewNotes::FilterPoseInstructions(Differences, *ModifiedBones);
+    }
+    // Format only the retained bones, so text and structured instructions have identical targets.
+    for (const FJJReviewPoseDifference& Difference : Differences)
+    {
+        const int32 B = Original.BoneNames.IndexOfByKey(Difference.Bone);
+        FVector Translation;
+        FQuat Delta;
+        if (!JJAnimReviewEditingPrivate::RelativeDelta(Original, Preview, B, Translation, Delta))
+        {
+            continue;
+        }
         const FVector Axis = Delta.GetRotationAxis();
         SignedInstructions += FString::Printf(TEXT("\n%s parent-space delta: move(%+.3f,%+.3f,%+.3f)cm; rotate axis(%+.4f,%+.4f,%+.4f) %.3fdeg;"),
-            *Difference.Bone.ToString(), Translation.X, Translation.Y, Translation.Z, Axis.X, Axis.Y, Axis.Z, Degrees);
+            *Difference.Bone.ToString(), Translation.X, Translation.Y, Translation.Z,
+            Axis.X, Axis.Y, Axis.Z, Difference.RotationDegrees);
     }
     return Differences;
 }

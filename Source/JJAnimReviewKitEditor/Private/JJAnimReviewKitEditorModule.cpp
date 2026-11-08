@@ -3,6 +3,7 @@
 #include "HAL/IConsoleManager.h"
 #include "JJAnimReviewService.h"
 #include "JJAnimReviewEngineCompat.h"
+#include "Materials/Material.h"
 
 DEFINE_LOG_CATEGORY_STATIC(LogJJAnimReviewConsole, Log, All);
 
@@ -30,6 +31,7 @@ public:
     virtual void ShutdownModule() override
     {
         JJAnimReviewEngineCompat::UnregisterPersona();
+        GhostMaterial.Material.Reset();
         if (SheetCommand)
         {
             IConsoleManager::Get().UnregisterConsoleObject(SheetCommand);
@@ -41,6 +43,8 @@ public:
             Command = nullptr;
         }
     }
+
+    FJJReviewGhostMaterialState GhostMaterial;
 
 private:
     void CreateReview(const TArray<FString>& Args, bool bCapture)
@@ -81,3 +85,8 @@ private:
 };
 
 IMPLEMENT_MODULE(FJJAnimReviewKitEditorModule, JJAnimReviewKitEditor)
+
+FJJReviewGhostMaterialState& JJAnimReviewEngineCompat::GhostMaterialState()
+{
+    return FModuleManager::GetModuleChecked<FJJAnimReviewKitEditorModule>(TEXT("JJAnimReviewKitEditor")).GhostMaterial;
+}

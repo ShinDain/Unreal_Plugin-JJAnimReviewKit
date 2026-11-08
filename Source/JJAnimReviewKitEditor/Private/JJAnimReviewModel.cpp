@@ -1,4 +1,5 @@
 #include "JJAnimReviewModel.h"
+#include "JJAnimReviewNotes.h"
 
 #include "Misc/SecureHash.h"
 #include "UObject/UnrealType.h"
@@ -158,11 +159,63 @@ bool JJAnimReviewModel::ValidateJsonShape(const TSharedPtr<FJsonObject>& Object,
     return true;
 }
 
+bool JJAnimReviewModel::ParseTakeName(const FString& Name, int32& Number)
+{
+    Number = 0;
+    if (!Name.StartsWith(TEXT("take_"), ESearchCase::CaseSensitive) || Name.Len() < 6 || Name[5] == TEXT('0'))
+    {
+        return false;
+    }
+    int64 Value = 0;
+    for (int32 Index = 5; Index < Name.Len(); ++Index)
+    {
+        if (Name[Index] < TEXT('0') || Name[Index] > TEXT('9'))
+        {
+            return false;
+        }
+        Value = Value * 10 + Name[Index] - TEXT('0');
+        if (Value > MAX_int32)
+        {
+            return false;
+        }
+    }
+    Number = static_cast<int32>(Value);
+    return Number > 0;
+}
+
+TArray<FString> JJAnimReviewModel::SortTakeNames(const TArray<FString>& Names)
+{
+    TArray<FString> Result;
+    for (const FString& Name : Names)
+    {
+        int32 Number = 0;
+        if (ParseTakeName(Name, Number))
+        {
+            Result.Add(Name);
+        }
+    }
+    Result.Sort([](const FString& A, const FString& B)
+    {
+        int32 NumberA = 0;
+        int32 NumberB = 0;
+        ParseTakeName(A, NumberA);
+        ParseTakeName(B, NumberB);
+        return NumberA < NumberB;
+    });
+    return Result;
+}
+
 FString JJAnimReviewModel::AssetDirectoryKey(const FString& CanonicalObjectPath)
 {
     const FString Lower = CanonicalObjectPath.ToLower();
+    FString AssetName;
+    CanonicalObjectPath.Split(TEXT("."), nullptr, &AssetName, ESearchCase::CaseSensitive, ESearchDir::FromEnd);
+    if (AssetName.IsEmpty())
+    {
+        CanonicalObjectPath.Split(TEXT("/"), nullptr, &AssetName, ESearchCase::CaseSensitive, ESearchDir::FromEnd);
+    }
     FString Readable;
-    for (TCHAR Character : Lower)
+    for (TCHAR Character : AssetName)
     {
         if (FChar::IsAlnum(Character) && Character < 128)
         {
@@ -174,10 +227,11 @@ FString JJAnimReviewModel::AssetDirectoryKey(const FString& CanonicalObjectPath)
         }
     }
     FMD5 Hash;
-    JJAnimReviewModelPrivate::HashText(Hash, Lower);
+    const FTCHARToUTF8 Utf8(*Lower);
+    Hash.Update(reinterpret_cast<const uint8*>(Utf8.Get()), Utf8.Length());
     uint8 Digest[16];
     Hash.Final(Digest);
-    return Readable.Left(80) + TEXT("_") + BytesToHex(Digest, UE_ARRAY_COUNT(Digest)).ToLower();
+    return Readable.Left(80) + TEXT("_") + BytesToHex(Digest, UE_ARRAY_COUNT(Digest)).ToLower().Left(6);
 }
 
 bool JJAnimReviewModel::ComputeContentId(const FJJReviewPoseData& Pose, FString& ContentId, FString& Error)
@@ -241,8 +295,8 @@ bool JJAnimReviewModel::ComputeContentId(const FJJReviewPoseData& Pose, FString&
 
 bool JJAnimReviewModel::ValidateBundle(const FJJReviewBundle& Bundle, FString& Error)
 {
-    if (Bundle.SchemaVersion != 1 || Bundle.Asset.IsEmpty() || Bundle.TakeNumber <= 0
-        || Bundle.Take != FString::Printf(TEXT("take_%06d"), Bundle.TakeNumber)
+    if (Bundle.SchemaVersion != 2 || Bundle.Asset.IsEmpty() || Bundle.TakeNumber <= 0
+        || Bundle.Take != FString::Printf(TEXT("take_%d"), Bundle.TakeNumber)
         || (!Bundle.ContentId.StartsWith(TEXT("pose_md5_v1:"))
             && !Bundle.ContentId.StartsWith(TEXT("pose_md5_v2:"))))
     {
@@ -260,6 +314,18 @@ bool JJAnimReviewModel::ValidateBundle(const FJJReviewBundle& Bundle, FString& E
             return false;
         }
         Ids.Add(Annotation.AnnotationId);
+        if (!JJAnimReviewNotes::ValidateRange(Annotation, MAX_int32, Error))
+        {
+            return false;
+        }
+        for (const FString& Image : Annotation.Images)
+        {
+            if (!JJAnimReviewNotes::IsSafeImagePath(Image))
+            {
+                Error = TEXT("Invalid annotation image path.");
+                return false;
+            }
+        }
     }
     return true;
 }
@@ -267,8 +333,14 @@ bool JJAnimReviewModel::ValidateBundle(const FJJReviewBundle& Bundle, FString& E
 void JJAnimReviewModel::SelectTake(FJJReviewBundle& NewBundle, const FJJReviewBundle* Latest, const FString& UtcNow)
 {
     const bool bSameContent = Latest && Latest->ContentId == NewBundle.ContentId;
+    if (Latest && !bSameContent && Latest->TakeNumber == MAX_int32)
+    {
+        NewBundle.TakeNumber = 0;
+        NewBundle.Take.Reset();
+        return;
+    }
     NewBundle.TakeNumber = Latest ? Latest->TakeNumber + (bSameContent ? 0 : 1) : 1;
-    NewBundle.Take = FString::Printf(TEXT("take_%06d"), NewBundle.TakeNumber);
+    NewBundle.Take = FString::Printf(TEXT("take_%d"), NewBundle.TakeNumber);
     NewBundle.CreatedUtc = bSameContent ? Latest->CreatedUtc : UtcNow;
     NewBundle.UpdatedUtc = UtcNow;
     if (!Latest)
@@ -483,6 +555,21 @@ FString JJAnimReviewModel::MakeMarkdown(const FJJReviewBundle& Bundle)
             return TEXT("- WARNING: ") + OneLine(Warning);
         });
     }
+    Section = Other;
+    for (const FString& Legend : JJAnimReviewNotes::GroupLegend(Bundle.Annotations))
+    {
+        Add([&]()
+        {
+            return TEXT("- group: ") + Legend;
+        });
+    }
+    if (Bundle.Images.Contains(TEXT("sheet.png")))
+    {
+        Add([]()
+        {
+            return FString(TEXT("Sheet: blue=left, red=right, green=center, yellow=annotation; front=mesh +Y (default yaw offset 90)."));
+        });
+    }
     const bool PreviousStates[] =
     {
         false, true
@@ -498,11 +585,16 @@ FString JJAnimReviewModel::MakeMarkdown(const FJJReviewBundle& Bundle)
             {
                 Add([&]()
                 {
-                    return FString::Printf(TEXT("- %df %s %s %s: %s%s"), Annotation.Frame,
-                        *OneLine(Annotation.Bone.ToString(), 40), *OneLine(Annotation.Direction, 10),
-                        *OneLine(Annotation.Amount, 10), *OneLine(Annotation.Text, 160),
-                        bOld ? TEXT(" [이전 버전에서 작성]") : TEXT(""));
+                    return TEXT("- ") + JJAnimReviewNotes::AnnotationLine(Annotation)
+                        + (bOld ? TEXT(" [이전 버전에서 작성]") : TEXT(""));
                 });
+                for (const FString& Image : Annotation.Images)
+                {
+                    Add([&]()
+                    {
+                        return TEXT("  image (asset directory): ") + Image;
+                    });
+                }
                 for (const FJJReviewPoseDifference& Instruction : Annotation.PoseInstructions)
                 {
                     Add([&]()

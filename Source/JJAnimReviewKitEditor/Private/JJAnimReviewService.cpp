@@ -1,4 +1,5 @@
 #include "JJAnimReviewService.h"
+#include "JJAnimReviewNotes.h"
 
 #include "JJAnimReviewEngineCompat.h"
 #include "JJAnimReviewModel.h"
@@ -69,6 +70,12 @@ bool JJAnimReviewService::ReadTakePose(const FString& Asset, const FString& Take
 bool JJAnimReviewService::EditAnnotation(const FString& Asset, const FString& ExpectedContentId,
     FJJReviewAnnotation Annotation, const FString& Operation, FString& Error)
 {
+    return EditAnnotationWithImage(Asset, ExpectedContentId, MoveTemp(Annotation), Operation, TEXT(""), Error);
+}
+
+bool JJAnimReviewService::EditAnnotationWithImage(const FString& Asset, const FString& ExpectedContentId,
+    FJJReviewAnnotation Annotation, const FString& Operation, const FString& SourceImage, FString& Error)
+{
     if (!IsInGameThread())
     {
         Error = TEXT("Game thread required");
@@ -111,19 +118,45 @@ bool JJAnimReviewService::EditAnnotation(const FString& Asset, const FString& Ex
         Error = TEXT("Animation content changed. Create a review bundle, then refresh the tab.");
         return false;
     }
-    if (!Pose.Samples.IsEmpty() && Annotation.Frame > Pose.Samples.Last().SourceFrame)
+    const bool bWriteContent = Operation == TEXT("add") || Operation == TEXT("update");
+    if (bWriteContent && (Pose.Samples.IsEmpty() || !JJAnimReviewNotes::ValidateRange(Annotation, Pose.Samples.Last().SourceFrame, Error)))
     {
-        Error = TEXT("Annotation frame exceeds the clip.");
+        if (Error.IsEmpty())
+        {
+            Error = TEXT("Annotation requires pose samples.");
+        }
         return false;
     }
-    if (!Annotation.Bone.IsNone() && !Pose.BoneNames.Contains(Annotation.Bone))
+    if (bWriteContent && !Annotation.Bone.IsNone() && !Pose.BoneNames.Contains(Annotation.Bone))
     {
         Error = TEXT("Annotation references a missing bone.");
         return false;
     }
+    for (FName Bone : Annotation.Bones)
+    {
+        if (bWriteContent && !Pose.BoneNames.Contains(Bone))
+        {
+            Error = TEXT("Annotation target references a missing bone.");
+            return false;
+        }
+    }
+    const int32 EditedIndex = Bundle.Annotations.IndexOfByPredicate([&](const auto& Note)
+    {
+        return Note.AnnotationId == Annotation.AnnotationId;
+    });
     if (!JJAnimReviewEditing::Apply(Bundle, Annotation, Operation, Error))
     {
         return false;
+    }
+    if (!SourceImage.IsEmpty())
+    {
+        const int32 ImageIndex = Operation == TEXT("add") ? Bundle.Annotations.Num() - 1 : EditedIndex;
+        if ((Operation != TEXT("add") && Operation != TEXT("update"))
+            || !Bundle.Annotations.IsValidIndex(ImageIndex)
+            || !Store.ImportImage(Bundle.Annotations[ImageIndex], SourceImage, Error))
+        {
+            return false;
+        }
     }
     Bundle.UpdatedUtc = FDateTime::UtcNow().ToIso8601();
     if (!Store.Save(Bundle, Pose, Error))
@@ -187,6 +220,18 @@ FJJAnimReviewResponse JJAnimReviewService::Run(const FJJAnimReviewRequest& Reque
     }
     Pose.ContentId = Bundle.ContentId;
     JJAnimReviewModel::SelectTake(Bundle, Takes.IsEmpty() ? nullptr : &Takes.Last(), FDateTime::UtcNow().ToIso8601());
+    if (Bundle.Take.IsEmpty())
+    {
+        Response.Error = TEXT("Cannot allocate a new take: the take number exceeds int32 capacity.");
+        return Response;
+    }
+    for (const auto& Note : Bundle.Annotations)
+    {
+        if (!Pose.Samples.IsEmpty() && JJAnimReviewNotes::EndFrame(Note) > Pose.Samples.Last().SourceFrame)
+        {
+            Bundle.Warnings.Add(TEXT("Carried annotation range exceeds the shorter clip; adjust its range: ") + Note.AnnotationId);
+        }
+    }
     FJJReviewCheckContext Context = JJAnimReviewEngineCompat::CheckContext(Animation, Bundle.ProfileSettings);
     Context.bEstimatedProfile = Bundle.bEstimatedProfile;
     Bundle.Checks = JJAnimReviewChecks::Evaluate(Pose, Bundle.ProfileSettings, Context);
@@ -243,9 +288,18 @@ FJJAnimReviewResponse JJAnimReviewService::Run(const FJJAnimReviewRequest& Reque
     {
         FString Reason;
         const FString Filename = Store.GetTakeDirectory(Bundle.Take) / TEXT("sheet.png");
-        if (JJAnimReviewEngineCompat::CaptureSheet(Animation, Pose, Request.Capture, Filename, Reason))
+        FJJReviewCaptureSettings Capture = Request.Capture;
+        if (!Bundle.bEstimatedProfile)
+        {
+            Capture.ForwardYawOffset = Bundle.ProfileSettings.ForwardYawOffset;
+        }
+        if (JJAnimReviewEngineCompat::CaptureSheetWithNotes(Animation, Pose, Capture, Bundle.Annotations, Filename, Reason))
         {
             Bundle.Images.AddUnique(TEXT("sheet.png"));
+            if (!Reason.IsEmpty())
+            {
+                Bundle.Warnings.Add(Reason);
+            }
         }
         else
         {
